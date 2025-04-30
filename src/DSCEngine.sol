@@ -54,6 +54,7 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenAddressesAndPriceFeedAddressesLengthsMustBeTheSame();
     error DSCEngine__TransferFailed();
     error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
+    error DSCEngine__MintFailed();
     
     ///////////////////////
     /// State Variables ///
@@ -151,10 +152,14 @@ contract DSCEngine is ReentrancyGuard {
     * @param _amount The amount of DSC to mint
     * @notice They must have more collateral value than the minimum threshold
     */
-    function mintDSC(uint256 _amount) external moreThanZero(_amount) {
+    function mintDSC(uint256 _amount) external moreThanZero(_amount) nonReentrant {
         s_DSCMinted[msg.sender] += _amount;
         // If they minted too much ($150 DSC, $100 of ETH)
         _revertIfHealthFactorIsBroken(msg.sender);
+        bool minted = i_dsc.mint(msg.sender, _amount);
+        if (!minted) {
+            revert DSCEngine__MintFailed();
+        }
     }
 
     /*
