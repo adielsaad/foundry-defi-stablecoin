@@ -26,6 +26,7 @@ pragma solidity ^0.8.19;
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 /**
  * @title DecentralizedStableCoin Engine
@@ -52,11 +53,22 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenNotAllowed();
     error DSCEngine__TokenAddressesAndPriceFeedAddressesLengthsMustBeTheSame();
     error DSCEngine__TransferFailed();
+    error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
+    
     ///////////////////////
     /// State Variables ///
     ///////////////////////
+    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+    uint256 private constant PRECISION = 1e18;
+    uint256 private constant LIQUIDATION_THRESHOLD = 50; // 200% over-collateralized
+    uint256 private constant LIQUIDATION_PRECISION = 100; 
+    uint256 private constant MIN_HEALTH_FACTOR = 1; // 100%
+
     mapping(address token => address priceFeed) private s_priceFeeds; // tokenToPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
+    mapping(address user => uint256 amountDSCMinted) private s_DSCMinted;
+    address[] private s_collateralTokens;
+    
     DecentralizedStableCoin private immutable i_dsc;
 
 
@@ -94,6 +106,7 @@ contract DSCEngine is ReentrancyGuard {
         // For example ETH/USD Price Feeds
         for (uint256 i = 0; i < _tokenAddresses.length; i++) {
             s_priceFeeds[_tokenAddresses[i]] = _priceFeedAddresses[i];
+            s_collateralTokens.push(_tokenAddresses[i]);
         }
         i_dsc = DecentralizedStableCoin(_dscAddress);
     }
@@ -133,7 +146,20 @@ contract DSCEngine is ReentrancyGuard {
     ) external {}
     function redeemCollateral(address _tokenCollateralAddress, uint256 _amountCollateral) external {}
 
-    function mintDSC(uint256 _amount) external {}
+    /*
+    * @notice Follows CEI pattern - Checks, Effects, Interactions
+    * @param _amount The amount of DSC to mint
+    * @notice They must have more collateral value than the minimum threshold
+    */
+    function mintDSC(uint256 _amount) external moreThanZero(_amount) {
+        s_DSCMinted[msg.sender] += _amount;
+        // If they minted too much ($150 DSC, $100 of ETH)
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
+
+    /*
+    
+    */
     function burnDSC(uint256 _amount) external {}
     function liquidate(
         address _tokenCollateralAddress,
@@ -143,4 +169,73 @@ contract DSCEngine is ReentrancyGuard {
     ) external {}
 
     function getHealthFactor(address _user) external view returns (uint256) {}
+
+    /////////////////////////////////////////
+    /// Private & Internal View Functions ///
+    /////////////////////////////////////////
+
+    function _getAccountInformation(address _user) private view returns (uint256 totalDSCMinted, uint256 totalCollateralValueInUSD) {
+        totalDSCMinted = s_DSCMinted[_user];
+        totalCollateralValueInUSD = getAccountCollateralValue(_user);
+        return (totalDSCMinted, totalCollateralValueInUSD);
+    }
+
+    /*
+    1. Get the amount of collateral
+    2. Get the amount of DSC minted
+    3. Calculate the health factor
+    4. Return how close to liquidation they are
+    If the health factor is less than 1, they are under-collateralized and can be liquidated.
+    If the health factor is greater than 1, they are over-collateralized and can continue to hold their position.
+    * @notice Health factor is a value that is used to determine if a user is over-collateralized or under-collateralized.
+    * @param _user The address of the user to check the health factor of
+    * @return The health factor of the user
+    */
+    function _healthFactor(address _user) private view returns (uint256) {
+        (uint256 totalDSCMinted, uint256 totalCollateralValueInUSD) = _getAccountInformation(_user);
+        uint256 collateralAdjustedForThreshold  = (totalCollateralValueInUSD * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+        /*
+        If the collateralAdjustedForThreshold is less than the totalDSCMinted, the user is under-collateralized and can be liquidated.
+        If the collateralAdjustedForThreshold is greater than the totalDSCMinted, the user is over-collateralized and can continue to hold their position.
+        For example, if the collateralAdjustedForThreshold is 100 and the totalDSCMinted is 50, the user is 2x over-collateralized.
+        So the health factor is 200%
+        */
+        return (collateralAdjustedForThreshold * PRECISION) / totalDSCMinted;
+    }
+    function _revertIfHealthFactorIsBroken(address _user) internal view {
+        /* 1. Check health factor
+           2. Revert if health factor is broken
+        */
+       uint256 userHealthFactor = _healthFactor(_user);
+       if (userHealthFactor < MIN_HEALTH_FACTOR) {
+        revert DSCEngine__BreaksHealthFactor(userHealthFactor);
+       }
+    }
+
+    /////////////////////////////////////////
+    /// Public & External View Functions ////
+    /////////////////////////////////////////
+
+    function getAccountCollateralValue(address _user) public view returns (uint256 totalCollateralValueInUSD) {
+        // Loop through each collateral token
+        // Get the amount of collateral deposited by the user
+        // Map it to the price to get the collateral value in USD
+        // Return the total collateral value in USD
+        for (uint256 i = 0; i < s_collateralTokens.length; i++) {
+            address token = s_collateralTokens[i];
+            uint256 amount = s_collateralDeposited[_user][token];
+            totalCollateralValueInUSD += getUsdValue(token, amount);
+        }
+        return totalCollateralValueInUSD;
+    }
+
+    function getUsdValue(address _tokenAddress, uint256 _amount) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[_tokenAddress]);
+        (, int256 price,,,) = priceFeed.latestRoundData();
+        // 1ETH = $1000
+        // The returned value from ChainLink will be 1000 * 1e8 = 1000000000
+        // We want to convert it to 1000 * 1e18 = 1000000000000000000
+        return ((uint256(price) * ADDITIONAL_FEED_PRECISION * _amount) / PRECISION) / ADDITIONAL_FEED_PRECISION; // (1000 * 1e10 * 1e18) / 1e18 = 1000 * 1e10 = 10000000000
+    }
+    
 }
