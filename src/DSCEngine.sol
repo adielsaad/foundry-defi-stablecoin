@@ -55,23 +55,22 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TransferFailed();
     error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
     error DSCEngine__MintFailed();
-    
+
     ///////////////////////
     /// State Variables ///
     ///////////////////////
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50; // 200% over-collateralized
-    uint256 private constant LIQUIDATION_PRECISION = 100; 
+    uint256 private constant LIQUIDATION_PRECISION = 100;
     uint256 private constant MIN_HEALTH_FACTOR = 1; // 100%
 
     mapping(address token => address priceFeed) private s_priceFeeds; // tokenToPriceFeed
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => uint256 amountDSCMinted) private s_DSCMinted;
     address[] private s_collateralTokens;
-    
-    DecentralizedStableCoin private immutable i_dsc;
 
+    DecentralizedStableCoin private immutable i_dsc;
 
     //////////////
     /// Events ///
@@ -179,7 +178,11 @@ contract DSCEngine is ReentrancyGuard {
     /// Private & Internal View Functions ///
     /////////////////////////////////////////
 
-    function _getAccountInformation(address _user) private view returns (uint256 totalDSCMinted, uint256 totalCollateralValueInUSD) {
+    function _getAccountInformation(address _user)
+        private
+        view
+        returns (uint256 totalDSCMinted, uint256 totalCollateralValueInUSD)
+    {
         totalDSCMinted = s_DSCMinted[_user];
         totalCollateralValueInUSD = getAccountCollateralValue(_user);
         return (totalDSCMinted, totalCollateralValueInUSD);
@@ -198,7 +201,8 @@ contract DSCEngine is ReentrancyGuard {
     */
     function _healthFactor(address _user) private view returns (uint256) {
         (uint256 totalDSCMinted, uint256 totalCollateralValueInUSD) = _getAccountInformation(_user);
-        uint256 collateralAdjustedForThreshold  = (totalCollateralValueInUSD * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+        uint256 collateralAdjustedForThreshold =
+            (totalCollateralValueInUSD * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
         /*
         If the collateralAdjustedForThreshold is less than the totalDSCMinted, the user is under-collateralized and can be liquidated.
         If the collateralAdjustedForThreshold is greater than the totalDSCMinted, the user is over-collateralized and can continue to hold their position.
@@ -207,14 +211,15 @@ contract DSCEngine is ReentrancyGuard {
         */
         return (collateralAdjustedForThreshold * PRECISION) / totalDSCMinted;
     }
+
     function _revertIfHealthFactorIsBroken(address _user) internal view {
         /* 1. Check health factor
            2. Revert if health factor is broken
         */
-       uint256 userHealthFactor = _healthFactor(_user);
-       if (userHealthFactor < MIN_HEALTH_FACTOR) {
-        revert DSCEngine__BreaksHealthFactor(userHealthFactor);
-       }
+        uint256 userHealthFactor = _healthFactor(_user);
+        if (userHealthFactor < MIN_HEALTH_FACTOR) {
+            revert DSCEngine__BreaksHealthFactor(userHealthFactor);
+        }
     }
 
     /////////////////////////////////////////
@@ -242,5 +247,4 @@ contract DSCEngine is ReentrancyGuard {
         // We want to convert it to 1000 * 1e18 = 1000000000000000000
         return ((uint256(price) * ADDITIONAL_FEED_PRECISION * _amount) / PRECISION) / ADDITIONAL_FEED_PRECISION; // (1000 * 1e10 * 1e18) / 1e18 = 1000 * 1e10 = 10000000000
     }
-    
 }
